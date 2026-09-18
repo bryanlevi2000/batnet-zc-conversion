@@ -1,16 +1,24 @@
 # zc_extraction.py
+
 import numpy as np
+from numba import njit
 
 
-def compute_hysteresis(samples: np.ndarray, percentile: float = 85.0) -> int:
-    """Vectorized hysteresis calculation."""
+def compute_hysteresis(
+    samples: np.ndarray,
+    percentile: float = 85.0
+) -> int:
+    """Calculate the hysteresis threshold from the waveform."""
+
     if samples.size == 0:
         return 1
 
     h = int(np.percentile(np.abs(samples), percentile))
+
     return max(1, min(h, 32767))
 
 
+@njit
 def wav_to_zc_times(
     samples: np.ndarray,
     divrat: int,
@@ -18,11 +26,25 @@ def wav_to_zc_times(
     dt: float
 ) -> np.ndarray:
     """
-    Optimized ZC timing. Uses a single loop over the array.
+    Extract zero-crossing times using a Numba-compiled loop.
+
+    This preserves the original stateful hysteresis algorithm while
+    avoiding Python-level iteration over every audio sample.
     """
-    outbuf = []
+
+    if samples.size == 0:
+        return np.empty(0, dtype=np.int64)
+
+    # Maximum possible number of output crossings is approximately
+    # half the number of input samples.
+    outbuf = np.empty(
+        samples.size // 2 + 1,
+        dtype=np.int64
+    )
+
     divcounter = 0
     T = 0.0
+    n_out = 0
 
     # Initialize state based on first sample
     y1 = float(samples[0])
@@ -37,31 +59,49 @@ def wav_to_zc_times(
     thresh_val = float(hysteresis)
 
     for i in range(1, len(samples)):
+
         y2 = float(samples[i])
         T += dt
 
         if rising:
+
             if y2 > new_threshold:
+
                 # Sub-sample interpolation
-                tz = (T - dt) + (new_threshold - y1) * dt / (y2 - y1)
+                tz = (
+                    (T - dt)
+                    + (new_threshold - y1) * dt / (y2 - y1)
+                )
 
                 divcounter += 1
 
                 if divcounter >= divrat:
-                    outbuf.append(int(tz + 0.5))
+
+                    outbuf[n_out] = int(tz + 0.5)
+                    n_out += 1
+
                     divcounter = 0
 
                 new_threshold = -thresh_val
                 rising = False
 
         else:
+
             if y2 < new_threshold:
-                tz = (T - dt) + (new_threshold - y1) * dt / (y2 - y1)
+
+                # Sub-sample interpolation
+                tz = (
+                    (T - dt)
+                    + (new_threshold - y1) * dt / (y2 - y1)
+                )
 
                 divcounter += 1
 
                 if divcounter >= divrat:
-                    outbuf.append(int(tz + 0.5))
+
+                    outbuf[n_out] = int(tz + 0.5)
+                    n_out += 1
+
                     divcounter = 0
 
                 new_threshold = thresh_val
@@ -69,84 +109,82 @@ def wav_to_zc_times(
 
         y1 = y2
 
-    return np.array(outbuf)
+    return outbuf[:n_out]
 
 
-def estimate_segment_mean_abs(
-    samples: np.ndarray,
+def compute_segment_integral(
+    cumulative_abs: np.ndarray,
     start_time_us: float,
     end_time_us: float,
     sample_period_us: float
 ) -> float:
-    """Mean absolute waveform amplitude across a time interval."""
+    """
+    Calculate the integral of |samples| between two arbitrary
+    times using a cumulative sum.
 
-    if samples.size == 0:
-        return 0.0
+    Linear interpolation is used at the interval boundaries.
+    """
 
     if not np.isfinite(start_time_us) or not np.isfinite(end_time_us):
         return np.nan
 
-    start = min(float(start_time_us), float(end_time_us))
-    end = max(float(start_time_us), float(end_time_us))
+    start = min(start_time_us, end_time_us)
+    end = max(start_time_us, end_time_us)
 
     if end <= start:
         return np.nan
 
-    # Clamp to valid sample window
+    n_samples = len(cumulative_abs) - 1
+
+    max_time = n_samples * sample_period_us
+
     start = max(0.0, start)
-    end = min(float(samples.size) * sample_period_us, end)
+    end = min(max_time, end)
 
     if end <= start:
         return np.nan
 
-    start_index = start / sample_period_us
-    end_index = end / sample_period_us
+    start_pos = start / sample_period_us
+    end_pos = end / sample_period_us
 
-    left = int(np.floor(start_index))
-    right = int(np.ceil(end_index)) - 1
+    # Integral at an arbitrary position.
+    #
+    # cumulative_abs[k] represents the integral through sample k.
+    start_index = int(np.floor(start_pos))
+    end_index = int(np.floor(end_pos))
 
-    left = max(0, left)
-    right = min(samples.size - 1, right)
+    start_index = max(0, min(start_index, n_samples))
+    end_index = max(0, min(end_index, n_samples))
 
-    if left > right:
-        center_index = int(
-            np.clip(
-                round((start_index + end_index) / 2.0),
-                0,
-                samples.size - 1
+    # Interpolate cumulative integral at the exact boundaries.
+    start_fraction = start_pos - start_index
+    end_fraction = end_pos - end_index
+
+    if start_index < n_samples:
+        start_integral = (
+            cumulative_abs[start_index]
+            + start_fraction
+            * (
+                cumulative_abs[start_index + 1]
+                - cumulative_abs[start_index]
             )
         )
-        return float(np.abs(samples[center_index]))
+    else:
+        start_integral = cumulative_abs[start_index]
 
-    total = 0.0
-    total_weight = 0.0
-
-    for idx in range(left, right + 1):
-        seg_start = idx * sample_period_us
-        seg_end = seg_start + sample_period_us
-
-        overlap_start = max(start, seg_start)
-        overlap_end = min(end, seg_end)
-
-        if overlap_end <= overlap_start:
-            continue
-
-        weight = (overlap_end - overlap_start) / sample_period_us
-
-        total += abs(float(samples[idx])) * weight
-        total_weight += weight
-
-    if total_weight <= 0.0:
-        center_index = int(
-            np.clip(
-                round((start_index + end_index) / 2.0),
-                0,
-                samples.size - 1
+    if end_index < n_samples:
+        end_integral = (
+            cumulative_abs[end_index]
+            + end_fraction
+            * (
+                cumulative_abs[end_index + 1]
+                - cumulative_abs[end_index]
             )
         )
-        return float(np.abs(samples[center_index]))
+    else:
+        end_integral = cumulative_abs[end_index]
 
-    return total / total_weight
+    return end_integral - start_integral
 
 
 def compute_time_frequency_and_amplitude(
@@ -161,39 +199,99 @@ def compute_time_frequency_and_amplitude(
         time_us
         freq_hz
         amplitude
+
+    Frequency is calculated from three consecutive zero crossings.
+
+    Amplitude is the mean absolute waveform amplitude between the
+    corresponding first and third zero crossings.
     """
 
     if len(times_us) < 3:
         return np.empty((0, 3))
 
+    # ------------------------------------------------------------
+    # Frequency
+    # ------------------------------------------------------------
+
     dt_us = times_us[2:] - times_us[:-2]
 
     valid = dt_us > 0
 
-    freqs = np.zeros_like(dt_us, dtype=float)
-    freqs[valid] = (divrat * 1e6) / dt_us[valid]
+    freqs = np.zeros_like(
+        dt_us,
+        dtype=float
+    )
 
-    amplitudes = np.full(dt_us.shape, np.nan, dtype=float)
+    freqs[valid] = (
+        divrat * 1e6
+    ) / dt_us[valid]
+
+    # ------------------------------------------------------------
+    # Amplitude
+    # ------------------------------------------------------------
+
+    # Compute |samples| once.
+    abs_samples = np.abs(
+        samples.astype(np.float64)
+    )
+
+    # Cumulative integral of |samples|.
+    #
+    # Each sample represents one sample_period_us interval.
+    cumulative_abs = np.empty(
+        len(abs_samples) + 1,
+        dtype=np.float64
+    )
+
+    cumulative_abs[0] = 0.0
+
+    cumulative_abs[1:] = np.cumsum(
+        abs_samples
+    ) * sample_period_us
+
+    amplitudes = np.full(
+        len(dt_us),
+        np.nan,
+        dtype=float
+    )
 
     if np.any(valid):
-        valid_indices = np.nonzero(valid)[0]
+
+        valid_indices = np.flatnonzero(valid)
 
         start_times = times_us[:-2][valid]
         end_times = times_us[2:][valid]
 
-        for idx, (start, end) in zip(
+        for idx, start, end in zip(
             valid_indices,
-            zip(start_times, end_times)
+            start_times,
+            end_times
         ):
-            amplitudes[idx] = estimate_segment_mean_abs(
-                samples,
-                start,
-                end,
+
+            duration = end - start
+
+            if duration <= 0:
+                continue
+
+            integral = compute_segment_integral(
+                cumulative_abs,
+                float(start),
+                float(end),
                 sample_period_us
             )
 
+            if np.isfinite(integral):
+
+                amplitudes[idx] = (
+                    integral / duration
+                )
+
     return np.column_stack(
-        (times_us[2:], freqs, amplitudes)
+        (
+            times_us[2:],
+            freqs,
+            amplitudes
+        )
     )
 
 
@@ -229,14 +327,23 @@ def extract_zc(
     if samples.size == 0:
         return np.empty((0, 3))
 
+    # ------------------------------------------------------------
+    # Hysteresis
+    # ------------------------------------------------------------
+
     hysteresis = compute_hysteresis(
         samples,
         hysteresis_percentile
     )
 
-    sample_period_us = 1e6 / sample_rate
+    sample_period_us = (
+        1e6 / sample_rate
+    )
 
-    # Calculate zero-crossing times
+    # ------------------------------------------------------------
+    # Zero-crossing times
+    # ------------------------------------------------------------
+
     times_us = wav_to_zc_times(
         samples,
         divrat,
@@ -244,7 +351,10 @@ def extract_zc(
         sample_period_us
     )
 
-    # Calculate frequency and amplitude
+    # ------------------------------------------------------------
+    # Frequency + amplitude
+    # ------------------------------------------------------------
+
     tf_data = compute_time_frequency_and_amplitude(
         samples,
         times_us,

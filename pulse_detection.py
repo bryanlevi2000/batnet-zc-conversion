@@ -9,9 +9,11 @@ from numpy.lib.stride_tricks import sliding_window_view
 def filter_zc_linearity(
     df,
     lookahead_n=10,
-    linearity_cutoff=0.8
+    linearity_cutoff=0.9
 ):
-    """Calculate local point linearity every lookahead_n / 2 points."""
+    """Calculate local point linearity every lookahead_n / 2 points,
+    plus a final backward-looking window ending at the last point.
+    """
 
     df_out = (
         df
@@ -19,40 +21,69 @@ def filter_zc_linearity(
         else df.sort_values("time_us")
     ).copy()
 
-    t = df_out["time_us"].values.astype(np.float64)
-    f = df_out["freq_hz"].values.astype(np.float64)
+    t = df_out["time_us"].to_numpy(dtype=np.float64)
+    f = df_out["freq_hz"].to_numpy(dtype=np.float64)
 
+    n = len(t)
     step = max(1, lookahead_n // 2)
+    window = lookahead_n + 1
 
-    if len(t) <= lookahead_n:
+    if n <= lookahead_n:
         df_out["linearity"] = np.nan
         df_out["status"] = 1
         return df_out
 
-    # Create all possible windows, then keep only every `step`th window.
-    t_win = sliding_window_view(t, lookahead_n + 1)[::step]
-    f_win = sliding_window_view(f, lookahead_n + 1)[::step]
+    # Starting points for the forward-looking windows.
+    indices = np.arange(
+        0,
+        n - lookahead_n,
+        step
+    )
 
-    dt = t_win - t_win.mean(axis=1, keepdims=True)
-    df_val = f_win - f_win.mean(axis=1, keepdims=True)
+    # The final window ends at the last point.
+    final_start = n - window
 
-    cov = (dt * df_val).sum(axis=1)
-    var_t = (dt ** 2).sum(axis=1)
-    var_f = (df_val ** 2).sum(axis=1)
+    # If the final window is not already included, add it.
+    if indices[-1] != final_start:
+        indices = np.append(indices, final_start)
+
+    # Generate all possible windows as a view, then select
+    # only the windows we actually need.
+    t_win = sliding_window_view(t, window)[indices]
+    f_win = sliding_window_view(f, window)[indices]
+
+    # Center each window.
+    t_mean = t_win.mean(axis=1, keepdims=True)
+    f_mean = f_win.mean(axis=1, keepdims=True)
+
+    dt = t_win - t_mean
+    df_val = f_win - f_mean
+
+    # Calculate R².
+    cov = np.sum(dt * df_val, axis=1)
+    var_t = np.sum(dt * dt, axis=1)
+    var_f = np.sum(df_val * df_val, axis=1)
 
     denom = var_t * var_f
 
-    r2 = np.where(
-        denom > 0,
-        (cov ** 2) / denom,
-        0.0
+    r2 = np.divide(
+        cov * cov,
+        denom,
+        out=np.zeros_like(cov),
+        where=denom > 0
     )
 
-    linearity = np.full(len(t), np.nan, dtype=np.float64)
+    # Initialize all points as having no linearity score.
+    linearity = np.full(n, np.nan, dtype=np.float64)
 
-    # Put each calculated value at its corresponding point.
-    indices = np.arange(0, len(t) - lookahead_n, step)
-    linearity[indices] = r2
+    # All regular windows get their score at their starting point.
+    regular_mask = indices != final_start
+    linearity[indices[regular_mask]] = r2[regular_mask]
+
+    # The final backward-looking window gets its score
+    # assigned specifically to the final point.
+    final_mask = indices == final_start
+    linearity[-1] = r2[final_mask][0]
 
     df_out["linearity"] = linearity
 
@@ -64,15 +95,21 @@ def filter_zc_linearity(
 
     return df_out
 
-
 def greedy_walk(
     df,
     time_cutoff,
     inc_freq_cutoff,
     dec_freq_cutoff,
-    min_points
+    min_points,
+    buffer_us=10000
 ):
-    """Greedily expand high-linearity points into candidate pulse segments."""
+    """Greedily expand high-linearity points into candidate pulse segments.
+
+    After each walk, the next walk cannot begin until after the specified
+    time buffer following the end of the previous walk.
+
+    Accepted walks are assigned sequential pulse_id values starting at 1.
+    """
 
     df_out = (
         df
@@ -80,14 +117,20 @@ def greedy_walk(
         else df.sort_values("time_us")
     ).copy()
 
-    t = df_out["time_us"].values
-    f = df_out["freq_hz"].values
-    s = df_out["status"].values
+    # Replace any existing pulse_id column.
+    df_out["pulse_id"] = pd.NA
 
-    n, i = len(s), 0
+    t = df_out["time_us"].to_numpy()
+    f = df_out["freq_hz"].to_numpy()
+    s = df_out["status"].to_numpy()
+
+    n = len(s)
+    i = 0
+    pulse_id = 1
 
     while i < n:
 
+        # Find the next high-linearity point.
         idx = np.where(s[i:] == 3)[0]
 
         if not idx.size:
@@ -135,47 +178,43 @@ def greedy_walk(
 
         bw_end = curr
 
-        # Reject segment if it is too short
+        # Reject segment if it is too short.
         if (fw_end - bw_end + 1) < min_points:
             s[bw_end:fw_end + 1] = 1
 
-        i = fw_end + 1
+        else:
+            # Accept the walk and assign its pulse ID.
+            df_out.iloc[bw_end:fw_end + 1, df_out.columns.get_loc("pulse_id")] = pulse_id
+
+            pulse_id += 1
+
+        # The next walk must start after the buffer following
+        # the end of this walk.
+        buffer_end_time = t[fw_end] + buffer_us
+
+        i = np.searchsorted(t, buffer_end_time, side="right")
 
     df_out["status"] = s
 
     return df_out
 
-
-def filter_status_three(df):
-    """Keep only points with status == 3."""
-
-    df = df.copy()
-
-    df["status"] = pd.to_numeric(
-        df["status"],
-        errors="coerce"
-    )
-
-    df = df.dropna(subset=["status"])
-
-    df["status"] = df["status"].astype(int)
-
-    filtered_df = df[df["status"] == 3].copy()
-
-    return filtered_df.drop(columns=["status"])
-
-
 def detect_pulse_points(
     df,
     lookahead_n=10,
-    linearity_cutoff=0.8,
+    linearity_cutoff=0.9,
     time_cutoff=500,
-    inc_freq_cutoff=5000,
+    inc_freq_cutoff=1000,
     dec_freq_cutoff=5000,
-    min_points=20
+    min_points=10,
+    buffer_us=10000
 ):
     """
     Identify potential bat pulse points from zero-crossing data.
+
+    All input rows are retained. Accepted greedy-walk segments are
+    marked with status = 3 and assigned a sequential pulse_id.
+    Rows not belonging to an accepted segment retain their status
+    and have a blank pulse_id.
 
     Parameters
     ----------
@@ -183,7 +222,8 @@ def detect_pulse_points(
         Zero-crossing dataframe containing time_us, freq_hz, and amplitude.
 
     lookahead_n : int
-        Number of points used for the local linearity calculation.
+        Number of points after each candidate point used for the
+        local linearity calculation.
 
     linearity_cutoff : float
         Cutoff value for determining high-linearity points.
@@ -204,11 +244,16 @@ def detect_pulse_points(
         Minimum number of points required for a greedy-walk segment
         to be retained.
 
+    buffer_us : float
+        Minimum time gap, in microseconds, after the end of one
+        greedy-walk segment before another segment can begin.
+
     Returns
     -------
     pandas.DataFrame
-        Zero-crossing dataframe containing only points identified
-        as potential bat pulse points.
+        Zero-crossing dataframe containing all original points,
+        with status = 3 and pulse_id assigned to accepted
+        greedy-walk segments.
     """
 
     with warnings.catch_warnings():
@@ -228,9 +273,8 @@ def detect_pulse_points(
             time_cutoff=time_cutoff,
             inc_freq_cutoff=inc_freq_cutoff,
             dec_freq_cutoff=dec_freq_cutoff,
-            min_points=min_points
+            min_points=min_points,
+            buffer_us=buffer_us
         )
-
-        df = filter_status_three(df)
 
     return df

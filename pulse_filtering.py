@@ -1,73 +1,142 @@
-# pulse_filtering.py
 import pandas as pd
+import numpy as np
 
 
 def calculate_pulse_metrics(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Calculate summary metrics for each pulse.
+    Calculate summary metrics for each accepted pulse.
 
-    Parameters
-    ----------
-    df : pandas.DataFrame
-        Dataframe containing time_us, freq_hz, and pulse_id.
-
-    Returns
-    -------
-    pandas.DataFrame
-        One row per pulse containing pulse metrics.
+    Only points with status == 3 are included in the calculations.
+    Pulses are processed independently by pulse_id.
     """
 
-    pulse_metrics = []
+    if df.empty:
+        return pd.DataFrame(columns=[
+            "pulse_id",
+            "n_points",
+            "duration_us",
+            "bandwidth_hz",
+            "fmin",
+            "fmax",
+            "first_freq_hz",
+            "last_freq_hz",
+            "increasing_count",
+            "decreasing_count",
+            "increasing_percent",
+            "decreasing_percent",
+        ])
 
-    for pulse_id, pulse in df.groupby("pulse_id", sort=True):
+    # Only calculate metrics from points that survived
+    # the previous filtering stages.
+    df = df[df["status"] == 3].copy()
 
-        pulse = pulse.sort_values("time_us").reset_index(drop=True)
+    if df.empty:
+        return pd.DataFrame(columns=[
+            "pulse_id",
+            "n_points",
+            "duration_us",
+            "bandwidth_hz",
+            "fmin",
+            "fmax",
+            "first_freq_hz",
+            "last_freq_hz",
+            "increasing_count",
+            "decreasing_count",
+            "increasing_percent",
+            "decreasing_percent",
+        ])
 
-        n_rows = len(pulse)
+    df_sorted = df.sort_values(
+        ["pulse_id", "time_us"],
+        kind="stable"
+    )
 
-        first_time = pulse["time_us"].iloc[0]
-        last_time = pulse["time_us"].iloc[-1]
+    grouped = df_sorted.groupby(
+        "pulse_id",
+        sort=True
+    )
 
-        first_frequency = pulse["freq_hz"].iloc[0]
-        last_frequency = pulse["freq_hz"].iloc[-1]
+    pulse_metrics = grouped.agg(
+        n_points=("freq_hz", "size"),
+        first_time=("time_us", "first"),
+        last_time=("time_us", "last"),
+        fmin=("freq_hz", "min"),
+        fmax=("freq_hz", "max"),
+        first_freq_hz=("freq_hz", "first"),
+        last_freq_hz=("freq_hz", "last"),
+    )
 
-        duration = last_time - first_time
+    pulse_metrics["duration_us"] = (
+        pulse_metrics["last_time"]
+        - pulse_metrics["first_time"]
+    )
 
-        bandwidth = (
-            pulse["freq_hz"].max()
-            - pulse["freq_hz"].min()
-        )
+    pulse_metrics["bandwidth_hz"] = (
+        pulse_metrics["fmax"]
+        - pulse_metrics["fmin"]
+    )
 
-        # Frequency differences between consecutive points
-        frequency_difference = pulse["freq_hz"].diff()
+    frequency_difference = (
+        df_sorted.groupby("pulse_id", sort=True)["freq_hz"]
+        .diff()
+    )
 
-        increasing_count = (frequency_difference > 0).sum()
-        decreasing_count = (frequency_difference < 0).sum()
+    increasing = frequency_difference > 0
+    decreasing = frequency_difference < 0
 
-        # There is one fewer comparison than there are rows
-        denominator = n_rows - 1
+    increasing_count = (
+        increasing
+        .groupby(df_sorted["pulse_id"], sort=True)
+        .sum()
+    )
 
-        if denominator > 0:
-            increasing_percent = increasing_count / denominator
-            decreasing_percent = decreasing_count / denominator
-        else:
-            increasing_percent = 0.0
-            decreasing_percent = 0.0
+    decreasing_count = (
+        decreasing
+        .groupby(df_sorted["pulse_id"], sort=True)
+        .sum()
+    )
 
-        pulse_metrics.append({
-            "pulse_id": pulse_id,
-            "n_points": n_rows,
-            "duration_us": duration,
-            "bandwidth_hz": bandwidth,
-            "first_freq_hz": first_frequency,
-            "last_freq_hz": last_frequency,
-            "increasing_count": increasing_count,
-            "decreasing_count": decreasing_count,
-            "increasing_percent": increasing_percent,
-            "decreasing_percent": decreasing_percent,
-        })
+    pulse_metrics["increasing_count"] = increasing_count
+    pulse_metrics["decreasing_count"] = decreasing_count
 
-    return pd.DataFrame(pulse_metrics)
+    denominator = pulse_metrics["n_points"] - 1
+
+    pulse_metrics["increasing_percent"] = np.divide(
+        pulse_metrics["increasing_count"],
+        denominator,
+        out=np.zeros(len(pulse_metrics), dtype=float),
+        where=denominator > 0
+    )
+
+    pulse_metrics["decreasing_percent"] = np.divide(
+        pulse_metrics["decreasing_count"],
+        denominator,
+        out=np.zeros(len(pulse_metrics), dtype=float),
+        where=denominator > 0
+    )
+
+    pulse_metrics = pulse_metrics.drop(
+        columns=["first_time", "last_time"]
+    ).reset_index()
+
+    pulse_metrics = pulse_metrics[
+        [
+            "pulse_id",
+            "n_points",
+            "duration_us",
+            "bandwidth_hz",
+            "fmin",
+            "fmax",
+            "first_freq_hz",
+            "last_freq_hz",
+            "increasing_count",
+            "decreasing_count",
+            "increasing_percent",
+            "decreasing_percent",
+        ]
+    ]
+
+    return pulse_metrics
 
 
 def filter_pulses(
@@ -78,90 +147,78 @@ def filter_pulses(
     max_duration_us: float,
     min_decreasing_percent: float,
     max_increasing_percent: float,
-) -> tuple[pd.DataFrame, pd.DataFrame]:
+    fmin_ranges: tuple[float, float],
+    fmax_ranges: tuple[float, float],
+) -> pd.DataFrame:
     """
     Calculate pulse metrics and filter pulses according to specified criteria.
 
-    Parameters
-    ----------
-    df : pandas.DataFrame
-        Dataframe containing time_us, freq_hz, and pulse_id.
-
-    min_bandwidth_hz : float
-        Minimum allowed pulse bandwidth in Hz.
-
-    max_bandwidth_hz : float
-        Maximum allowed pulse bandwidth in Hz.
-
-    min_duration_us : float
-        Minimum allowed pulse duration in microseconds.
-
-    max_duration_us : float
-        Maximum allowed pulse duration in microseconds.
-
-    min_decreasing_percent : float
-        Minimum required proportion of decreasing frequency transitions.
-        Expressed as a decimal. For example, 0.80 = 80%.
-
-    max_increasing_percent : float
-        Maximum allowed proportion of increasing frequency transitions.
-        Expressed as a decimal. For example, 0.20 = 20%.
-
-    Returns
-    -------
-    accepted_df : pandas.DataFrame
-        Original point-level dataframe containing only accepted pulses.
-
-    pulse_metrics : pandas.DataFrame
-        One row per pulse containing calculated metrics and acceptance status.
+    All input rows are retained. Points belonging to accepted pulses have
+    status = 3, while points belonging to rejected pulses have status = 1.
+    Rows with no pulse_id are also retained unchanged.
     """
 
     pulse_metrics = calculate_pulse_metrics(df)
 
-    # Start with every pulse accepted
+    min_fmin_hz, max_fmin_hz = fmin_ranges
+    min_fmax_hz, max_fmax_hz = fmax_ranges
+
     pulse_metrics["accepted"] = True
 
-    # Bandwidth restriction
     pulse_metrics.loc[
         (pulse_metrics["bandwidth_hz"] < min_bandwidth_hz)
         | (pulse_metrics["bandwidth_hz"] > max_bandwidth_hz),
         "accepted"
     ] = False
 
-    # Duration restriction
     pulse_metrics.loc[
         (pulse_metrics["duration_us"] < min_duration_us)
         | (pulse_metrics["duration_us"] > max_duration_us),
         "accepted"
     ] = False
 
-    # Reject pulses whose final frequency is higher than their initial frequency
+    pulse_metrics.loc[
+        (pulse_metrics["fmin"] < min_fmin_hz)
+        | (pulse_metrics["fmin"] > max_fmin_hz),
+        "accepted"
+    ] = False
+
+    pulse_metrics.loc[
+        (pulse_metrics["fmax"] < min_fmax_hz)
+        | (pulse_metrics["fmax"] > max_fmax_hz),
+        "accepted"
+    ] = False
+
     pulse_metrics.loc[
         pulse_metrics["last_freq_hz"] > pulse_metrics["first_freq_hz"],
         "accepted"
     ] = False
 
-    # Minimum percentage of decreasing frequency transitions
     pulse_metrics.loc[
         pulse_metrics["decreasing_percent"] < min_decreasing_percent,
         "accepted"
     ] = False
 
-    # Maximum percentage of increasing frequency transitions
     pulse_metrics.loc[
         pulse_metrics["increasing_percent"] > max_increasing_percent,
         "accepted"
     ] = False
 
-    # Get IDs of accepted pulses
+    accepted_df = df.copy()
+
+    accepted_df.loc[
+        accepted_df["pulse_id"].notna(),
+        "status"
+    ] = 1
+
     accepted_ids = pulse_metrics.loc[
         pulse_metrics["accepted"],
         "pulse_id"
     ]
 
-    # Keep only accepted pulses in the original point-level dataframe
-    accepted_df = df[
-        df["pulse_id"].isin(accepted_ids)
-    ].copy()
+    accepted_df.loc[
+        accepted_df["pulse_id"].isin(accepted_ids),
+        "status"
+    ] = 3
 
-    return accepted_df, pulse_metrics
+    return accepted_df
