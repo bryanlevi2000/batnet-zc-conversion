@@ -1,44 +1,60 @@
-#denoise.py
+# denoise.py
 
 import numpy as np
-import librosa
+from scipy import signal
 
-def denoise_audio(y, noise_factor=1.0):
-    """
-    Apply spectral median subtraction to an audio signal.
+
+def denoise_audio(y, noise_factor=2.0, n_fft=512, noise_stride=4):
+    """Spectral-subtraction denoiser using a per-frequency median noise floor.
 
     Parameters
     ----------
-    y : np.ndarray
-        Audio signal.
+    y : array-like
+        1-D audio signal.
     noise_factor : float
-        Scaling factor for the spectral median subtraction.
+        Multiplier applied to the median noise floor before subtraction.
+    n_fft : int
+        STFT window length (samples). Hop is n_fft // 2 (50% overlap).
+    noise_stride : int
+        Use every `noise_stride`-th time frame when estimating the noise
+        floor. 1 reproduces the full median over all frames; larger values
+        are faster and nearly identical for long, stationary-noise files.
 
     Returns
     -------
-    y_denoised : np.ndarray
-        Denoised audio signal.
+    np.ndarray
+        Denoised signal, same length as the input.
     """
+    y = np.asarray(y, dtype=np.float32)
+    n = len(y)
+    noverlap = n_fft // 2
 
-    # 1. Compute the Short-Time Fourier Transform
-    S = librosa.stft(y, n_fft=512)
+    # Pad with zeros at the edges so the STFT is invertible everywhere
+    # (satisfies the NOLA condition; no warning from istft).
+    _, _, S = signal.stft(
+        y, nperseg=n_fft, noverlap=noverlap, boundary="zeros"
+    )
 
-    # 2. Separate magnitude and phase
-    mag, phase = librosa.magphase(S)
+    # Noise floor: per-frequency median magnitude across (a subset of) frames
+    mag = np.abs(S)
+    noise = np.median(mag[:, ::noise_stride], axis=1, keepdims=True)
+    noise *= noise_factor
 
-    # 3. Calculate median magnitude across time for each frequency bin
-    median_mag = np.median(mag, axis=1, keepdims=True)
+    # Spectral subtraction as a gain applied directly to the complex spectrum:
+    #   gain = max(1 - noise / mag, 0)
+    # (equivalent to clip(mag - noise, 0) * S / mag, without the phase
+    # round trip). Done in place on `mag` to avoid extra temporaries.
+    np.maximum(mag, 1e-10, out=mag)   # avoid division by zero
+    np.divide(noise, mag, out=mag)    # noise / mag
+    np.subtract(1.0, mag, out=mag)    # 1 - noise / mag
+    np.maximum(mag, 0.0, out=mag)     # clip -> gain
+    S *= mag
 
-    # 4. Subtract the median spectrum
-    mag_denoised = mag - (median_mag * noise_factor)
+    # Inverse STFT; boundary=True strips the padding added by stft above.
+    _, y_denoised = signal.istft(
+        S, nperseg=n_fft, noverlap=noverlap, boundary=True
+    )
 
-    # 5. Half-wave rectification
-    mag_denoised = np.maximum(mag_denoised, 0)
-
-    # 6. Recombine denoised magnitude with original phase
-    S_denoised = mag_denoised * phase
-
-    # 7. Convert back to time domain
-    y_denoised = librosa.istft(S_denoised)
-
-    return y_denoised
+    # stft's default padded=True can leave a few trailing samples
+    return y_denoised[:n]
+    

@@ -2,13 +2,13 @@
 # INPUT / OUTPUT
 # ============================================================
 
-INPUT_DIR = r"C:\Users\Students\Desktop\pulse detection\wav_files"
+INPUT_DIR = r"path\to\input\directory"
 
-OUTPUT_DIR = r"C:\Users\Students\Desktop\pulse detection\custom_zc_14\files"
+OUTPUT_DIR = r"path\to\output\directory"
 
 # Output mode - specify "individual" to have one CSV per pulse,
 # or "combined" to have one CSV per WAV file
-OUTPUT_MODE = "combined"  # individual or combined
+OUTPUT_MODE = "individual"  # individual or combined
 
 
 # ============================================================
@@ -16,6 +16,7 @@ OUTPUT_MODE = "combined"  # individual or combined
 # ============================================================
 
 NOISE_FACTOR = 2.0
+NOISE_STRIDE = 4
 
 
 # ============================================================
@@ -85,4 +86,4 @@ FMAX_RANGES = (10000, 130000)
 # PARALLEL PROCESSING
 # ============================================================
 
-NUM_WORKERS = 12
+NUM_WORKERS = 24

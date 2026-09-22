@@ -60,7 +60,8 @@ def process_wav(source_path):
 
     y = denoise_audio(
         y,
-        noise_factor=config.NOISE_FACTOR
+        noise_factor=config.NOISE_FACTOR,
+        noise_stride=config.NOISE_STRIDE
     )
 
     # Convert back to the integer scale expected by ZC extraction
@@ -337,3 +338,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+    
