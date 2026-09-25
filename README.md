@@ -8,3 +8,7 @@ Python pipeline to extract zero crossing bat pulses from audio files. The workfl
     a prespecified time and frequency. When walk ends, restart at next candidate point that is farther away than a buffer time. Each walk becomes a pulse_id
 - For each pulse, bottom 10% of points in frequency get a tighter decreasing frequency constraint than the greedy walk
 - Get pulse metrics and filter pulses so metrics make semantic sense for bats
+
+To run, first cd "C:\Users\Students\Box\BatNET 2024-2026\Bryan Files\GitHub\batnet-zc-conversion"
+set PYTHONPATH=%CD%
+python scripts\timmed_pipeline.py

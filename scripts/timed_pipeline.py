@@ -1,4 +1,4 @@
-# timed_pipeline.py
+# pipeline.py
 
 from pathlib import Path
 from concurrent.futures import ProcessPoolExecutor, as_completed
@@ -10,12 +10,15 @@ from tqdm import tqdm
 
 import config
 
-from denoise import denoise_audio
-from zc_extraction import extract_zc
-from pulse_detection import filter_zc_linearity, greedy_walk
-from pulse_cleanup import filter_pulse_frequency_gaps
-from pulse_filtering import calculate_pulse_metrics, filter_pulses
-from output import write_pulses
+from batnet_zc.denoise import denoise_audio
+from batnet_zc.zc_extraction import extract_zc
+from batnet_zc.pulse_detection import filter_zc_linearity, greedy_walk
+from batnet_zc.pulse_filtering import (
+    find_characteristic_frequency,
+    apply_frequency_decrease_cutoff,
+    filter_pulses,
+)
+from batnet_zc.output import write_pulses
 
 
 # ============================================================
@@ -32,8 +35,8 @@ def process_wav(source_path):
         "zc_extraction": 0.0,
         "local_linearity": 0.0,
         "greedy_walk": 0.0,
-        "frequency_gap_filter": 0.0,
-        "pulse_metrics": 0.0,
+        "characteristic_frequency": 0.0,
+        "frequency_decrease_cutoff": 0.0,
         "pulse_filtering": 0.0,
         "csv_writing": 0.0,
     }
@@ -125,40 +128,78 @@ def process_wav(source_path):
     times["greedy_walk"] = time.perf_counter() - start
 
     # --------------------------------------------------------
-    # Pulse frequency-gap filtering
+    # Characteristic frequency
     # --------------------------------------------------------
 
     start = time.perf_counter()
 
-    df = filter_pulse_frequency_gaps(
-        df,
-        frequency_percentile=(
-            config.PULSE_FREQUENCY_LOWER_PERCENTILE
-        ),
-        upper_decreasing_cutoff_hz=(
-            config.PULSE_UPPER_DECREASING_FREQ_CUTOFF_HZ
-        ),
-        lower_decreasing_cutoff_hz=(
-            config.PULSE_LOWER_DECREASING_FREQ_CUTOFF_HZ
-        )
-    )
+    # Work only with candidate pulse points
+    candidate_df = df[df["status"] > 1].copy()
 
-    times["frequency_gap_filter"] = (
+    for pulse_id, pulse_df in candidate_df.groupby(
+        "pulse_id",
+        sort=False
+    ):
+
+        characteristic_index = find_characteristic_frequency(
+            pulse_df,
+            min_points=config.CHARACTERISTIC_MIN_POINTS,
+            last_fraction=config.CHARACTERISTIC_LAST_FRACTION
+        )
+
+        if characteristic_index is not None:
+            df.loc[
+                characteristic_index,
+                "status"
+            ] = 3
+
+    times["characteristic_frequency"] = (
         time.perf_counter() - start
     )
 
     # --------------------------------------------------------
-    # Pulse metric calculation
+    # Frequency-decrease cutoff
     # --------------------------------------------------------
 
     start = time.perf_counter()
 
-    calculate_pulse_metrics(df)
+    candidate_df = df[df["status"] > 1].copy()
 
-    times["pulse_metrics"] = time.perf_counter() - start
+    for pulse_id, pulse_df in candidate_df.groupby(
+        "pulse_id",
+        sort=False
+    ):
+
+        # Find the characteristic-frequency point
+        characteristic_points = pulse_df[
+            pulse_df["status"] == 3
+        ]
+
+        if characteristic_points.empty:
+            continue
+
+        characteristic_index = characteristic_points.index[0]
+
+        pulse_result = apply_frequency_decrease_cutoff(
+            pulse_df,
+            characteristic_index=characteristic_index,
+            cutoff_hz=(
+                config.CHARACTERISTIC_FREQUENCY_DECREASE_CUTOFF_HZ
+            )
+        )
+
+        # Copy modified status values back into main dataframe
+        df.loc[
+            pulse_result.index,
+            "status"
+        ] = pulse_result["status"]
+
+    times["frequency_decrease_cutoff"] = (
+        time.perf_counter() - start
+    )
 
     # --------------------------------------------------------
-    # Pulse filtering
+    # Pulse metric calculation and filtering
     # --------------------------------------------------------
 
     start = time.perf_counter()
@@ -169,19 +210,19 @@ def process_wav(source_path):
         max_bandwidth_hz=config.MAX_BANDWIDTH_HZ,
         min_duration_us=config.MIN_DURATION_US,
         max_duration_us=config.MAX_DURATION_US,
-        min_decreasing_percent=config.MIN_DECREASING_PERCENT,
-        max_increasing_percent=config.MAX_INCREASING_PERCENT,
         fmin_ranges=config.FMIN_RANGES,
         fmax_ranges=config.FMAX_RANGES
     )
 
-    times["pulse_filtering"] = time.perf_counter() - start
+    times["pulse_filtering"] = (
+        time.perf_counter() - start
+    )
 
     # --------------------------------------------------------
     # Keep only accepted pulse points for output
     # --------------------------------------------------------
 
-    output_df = df[df["status"] == 3].copy()
+    output_df = df[df["status"] > 1].copy()
 
     # --------------------------------------------------------
     # Write CSVs
@@ -236,8 +277,8 @@ def main():
         "zc_extraction": 0.0,
         "local_linearity": 0.0,
         "greedy_walk": 0.0,
-        "frequency_gap_filter": 0.0,
-        "pulse_metrics": 0.0,
+        "characteristic_frequency": 0.0,
+        "frequency_decrease_cutoff": 0.0,
         "pulse_filtering": 0.0,
         "csv_writing": 0.0,
     }
@@ -302,9 +343,9 @@ def main():
         "zc_extraction": "Zero-crossing extraction",
         "local_linearity": "Local linearity calculation",
         "greedy_walk": "Greedy walk",
-        "frequency_gap_filter": "Pulse frequency-gap filter",
-        "pulse_metrics": "Pulse metric calculation",
-        "pulse_filtering": "Pulse filtering",
+        "characteristic_frequency": "Characteristic frequency",
+        "frequency_decrease_cutoff": "Frequency decrease cutoff",
+        "pulse_filtering": "Pulse metric calculation/filtering",
         "csv_writing": "Writing CSVs",
     }
 

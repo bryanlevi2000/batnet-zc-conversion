@@ -89,11 +89,12 @@ def filter_zc_linearity(
 
     df_out["status"] = np.where(
         (linearity >= linearity_cutoff) & np.isfinite(linearity),
-        3,
+        2,
         1
     )
 
     return df_out
+
 
 def greedy_walk(
     df,
@@ -131,7 +132,7 @@ def greedy_walk(
     while i < n:
 
         # Find the next high-linearity point.
-        idx = np.where(s[i:] == 3)[0]
+        idx = np.where(s[i:] == 2)[0]
 
         if not idx.size:
             break
@@ -153,7 +154,7 @@ def greedy_walk(
             ):
                 break
 
-            s[curr + 1] = 3
+            s[curr + 1] = 2
             curr += 1
 
         fw_end = curr
@@ -173,7 +174,7 @@ def greedy_walk(
             ):
                 break
 
-            s[curr - 1] = 3
+            s[curr - 1] = 2
             curr -= 1
 
         bw_end = curr
@@ -184,7 +185,10 @@ def greedy_walk(
 
         else:
             # Accept the walk and assign its pulse ID.
-            df_out.iloc[bw_end:fw_end + 1, df_out.columns.get_loc("pulse_id")] = pulse_id
+            df_out.iloc[
+                bw_end:fw_end + 1,
+                df_out.columns.get_loc("pulse_id")
+            ] = pulse_id
 
             pulse_id += 1
 
@@ -192,11 +196,24 @@ def greedy_walk(
         # the end of this walk.
         buffer_end_time = t[fw_end] + buffer_us
 
-        i = np.searchsorted(t, buffer_end_time, side="right")
+        i = np.searchsorted(
+            t,
+            buffer_end_time,
+            side="right"
+        )
 
-    df_out["status"] = s
+    # --------------------------------------------------------
+    # Only points belonging to an accepted pulse are status 2.
+    # --------------------------------------------------------
+
+    df_out["status"] = np.where(
+        df_out["pulse_id"].notna(),
+        2,
+        1
+    )
 
     return df_out
+
 
 def detect_pulse_points(
     df,
@@ -212,7 +229,7 @@ def detect_pulse_points(
     Identify potential bat pulse points from zero-crossing data.
 
     All input rows are retained. Accepted greedy-walk segments are
-    marked with status = 3 and assigned a sequential pulse_id.
+    marked with status = 2 and assigned a sequential pulse_id.
     Rows not belonging to an accepted segment retain their status
     and have a blank pulse_id.
 
@@ -252,7 +269,7 @@ def detect_pulse_points(
     -------
     pandas.DataFrame
         Zero-crossing dataframe containing all original points,
-        with status = 3 and pulse_id assigned to accepted
+        with status = 2 and pulse_id assigned to accepted
         greedy-walk segments.
     """
 
