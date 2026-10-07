@@ -59,7 +59,7 @@ def filter_zc_linearity(
     dt = t_win - t_mean
     df_val = f_win - f_mean
 
-    # Calculate R².
+    # Calculate R2.
     cov = np.sum(dt * df_val, axis=1)
     var_t = np.sum(dt * dt, axis=1)
     var_f = np.sum(df_val * df_val, axis=1)
@@ -93,7 +93,7 @@ def filter_zc_linearity(
         1
     )
 
-    return df_out
+    return df_out.drop(columns=["linearity"])
 
 
 def greedy_walk(
@@ -104,7 +104,7 @@ def greedy_walk(
     min_points,
     buffer_us=10000
 ):
-    """Greedily expand high-linearity points into candidate pulse segments.
+    """Greedy walk algorithm to expand high-linearity points into candidate pulse segments.
 
     After each walk, the next walk cannot begin until after the specified
     time buffer following the end of the previous walk.
@@ -126,18 +126,18 @@ def greedy_walk(
     s = df_out["status"].to_numpy()
 
     n = len(s)
+    pulse_ids = np.full(n, pd.NA, dtype=object)
     i = 0
     pulse_id = 1
 
     while i < n:
+        while i < n and s[i] != 2:
+            i += 1
 
-        # Find the next high-linearity point.
-        idx = np.where(s[i:] == 2)[0]
-
-        if not idx.size:
+        if i == n:
             break
 
-        base = i + idx[0]
+        base = i
 
         # Forward walk
         curr = base
@@ -184,12 +184,7 @@ def greedy_walk(
             s[bw_end:fw_end + 1] = 1
 
         else:
-            # Accept the walk and assign its pulse ID.
-            df_out.iloc[
-                bw_end:fw_end + 1,
-                df_out.columns.get_loc("pulse_id")
-            ] = pulse_id
-
+            pulse_ids[bw_end:fw_end + 1] = pulse_id
             pulse_id += 1
 
         # The next walk must start after the buffer following
@@ -202,15 +197,8 @@ def greedy_walk(
             side="right"
         )
 
-    # --------------------------------------------------------
-    # Only points belonging to an accepted pulse are status 2.
-    # --------------------------------------------------------
-
-    df_out["status"] = np.where(
-        df_out["pulse_id"].notna(),
-        2,
-        1
-    )
+    df_out["pulse_id"] = pulse_ids
+    df_out["status"] = np.where(pd.isna(pulse_ids), 1, 2)
 
     return df_out
 
@@ -233,44 +221,6 @@ def detect_pulse_points(
     Rows not belonging to an accepted segment retain their status
     and have a blank pulse_id.
 
-    Parameters
-    ----------
-    df : pandas.DataFrame
-        Zero-crossing dataframe containing time_us, freq_hz, and amplitude.
-
-    lookahead_n : int
-        Number of points after each candidate point used for the
-        local linearity calculation.
-
-    linearity_cutoff : float
-        Cutoff value for determining high-linearity points.
-
-    time_cutoff : float
-        Maximum allowed time difference between adjacent points
-        during the greedy walk, in microseconds.
-
-    inc_freq_cutoff : float
-        Maximum allowed frequency increase between adjacent points,
-        in Hz.
-
-    dec_freq_cutoff : float
-        Maximum allowed frequency decrease between adjacent points,
-        in Hz.
-
-    min_points : int
-        Minimum number of points required for a greedy-walk segment
-        to be retained.
-
-    buffer_us : float
-        Minimum time gap, in microseconds, after the end of one
-        greedy-walk segment before another segment can begin.
-
-    Returns
-    -------
-    pandas.DataFrame
-        Zero-crossing dataframe containing all original points,
-        with status = 2 and pulse_id assigned to accepted
-        greedy-walk segments.
     """
 
     with warnings.catch_warnings():

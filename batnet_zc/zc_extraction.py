@@ -1,5 +1,4 @@
 # zc_extraction.py
-
 import numpy as np
 from numba import njit
 
@@ -28,8 +27,6 @@ def wav_to_zc_times(
     """
     Extract zero-crossing times using a Numba-compiled loop.
 
-    This preserves the original stateful hysteresis algorithm while
-    avoiding Python-level iteration over every audio sample.
     """
 
     if samples.size == 0:
@@ -305,23 +302,6 @@ def extract_zc(
     Extract zero-crossing time, frequency, and amplitude data
     from an audio signal.
 
-    Parameters
-    ----------
-    samples : np.ndarray
-        Audio waveform.
-    sample_rate : int
-        Audio sample rate in Hz.
-    divrat : int
-        Zero-crossing division ratio.
-    hysteresis_percentile : float
-        Percentile used to calculate hysteresis.
-
-    Returns
-    -------
-    np.ndarray
-        Array with columns:
-
-        [time_us, freq_hz, amplitude]
     """
 
     if samples.size == 0:

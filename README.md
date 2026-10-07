@@ -11,4 +11,4 @@ Python pipeline to extract zero crossing bat pulses from audio files. The workfl
 
 To run, first cd "C:\Users\Students\Box\BatNET 2024-2026\Bryan Files\GitHub\batnet-zc-conversion"
 set PYTHONPATH=%CD%
-python scripts\timmed_pipeline.py
+python scripts\timed_pipeline.py

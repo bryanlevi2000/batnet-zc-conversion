@@ -2,13 +2,13 @@
 # INPUT / OUTPUT
 # ============================================================
 
-INPUT_DIR = r"path\to\input\directory"
+INPUT_DIR = r"C:\Users\Students\Desktop\pulse detection\wav_files"
 
-OUTPUT_DIR = r"path\to\output\directory"
+OUTPUT_DIR = r"C:\Users\Students\Desktop\pulse detection\custom_zc_15\files"
 
 # Output mode - specify "individual" to have one CSV per pulse,
 # or "combined" to have one CSV per WAV file
-OUTPUT_MODE = "individual"  # individual or combined
+OUTPUT_MODE = "combined"  # individual or combined
 
 
 # ============================================================
